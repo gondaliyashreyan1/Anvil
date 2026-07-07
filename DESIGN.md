@@ -156,6 +156,22 @@ When --ngl is NOT specified by the user:
 
 When --ngl IS specified, we use the user's value and do not override.
 
+### 3.5 TurboQuant KV Cache Defaults
+
+Anvil defaults to TurboQuant3 for both K and V caches when the user does not specify `--cache-type-k` or `--cache-type-v`.
+
+| Cache | Default | Rationale |
+|---|---|---|
+| K (key)   | `turbo3` | ~4.3x compression over f16, near-lossless quality |
+| V (value) | `turbo3` | ~4.3x compression over f16, near-lossless quality |
+
+Turbo3 compresses the KV cache to ~3 bits per value using a WHT-rotated, two-stage codebook process. Perplexity stays almost identical to full f16, making it effectively near-lossless for practical workloads. At 2-bit (turbo2), quality dips become measurable; at 3-bit (turbo3), the tradeoff is negligible.
+
+Override at your own risk:
+```bash
+anvil run model.gguf --cache-type-k f16 --cache-type-v f16
+```
+
 ---
 
 ## 4. Hardware Prober
