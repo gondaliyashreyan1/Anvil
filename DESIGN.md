@@ -2,7 +2,7 @@
 
 ## Overview
 
-Anvil v0.1 is a **single binary** that embeds the entire llama.cpp inference engine via in-process womb-to-tomb C FFI. The user sees a friendly CLI (`anvil run model.gguf --temp 0.7`), but under the hood it is a native function call into llama.cpp's `main.cpp` entrypoint. Zero subprocess. Zero serialization. Maximum speed.
+Anvil v0.1 is a **single binary** that embeds the entire llama.cpp inference engine via in-process C FFI. The user sees a friendly CLI (`anvil run model.gguf --temp 0.7`), but under the hood we call llama.cpp's C API directly via `llama.h`. Zero subprocess. Zero serialization. Maximum speed.
 
 ---
 
@@ -16,39 +16,48 @@ Developer runs: cargo build --release
    |-- Calls cmake on backends/llama-turbo/
    |   |
    |   +-- Produces libllama.a (static library)
-   |   +-- Produces main.o (from our patched examples/main/main.cpp)
    |
-   +-- Links libllama.a + main.o into the Rust binary
-   +-- Generates src/engine/bindings.rs (raw FFI declarations)
+   +-- Links libllama.a + ggml libs into the Rust binary
+   +-- src/engine/raw.rs (raw FFI declarations)
 
 2. cargo compiles Rust sources
    |
    +-- src/main.rs (CLI parsing, dispatch)
-   +-- src/engine/mod.rs (safe Rust wrappers)
+   +-- src/engine/mod.rs (safe Rust wrappers, inference loop)
+   +-- src/engine/raw.rs (extern "C" blocks for llama.h)
    +-- src/hardware/probe.rs (hardware detection)
    +-- src/config.rs (JSON config read/write)
 
 3. Linker produces final anvil binary
    |
    +-- Contains libllama.a (all backends: Metal, CUDA, Vulkan, CPU)
-   +-- Contains patched main.o (anvil_llama_main entrypoint)
-   +-- Contains Rust orchestrator
+   +-- Contains Rust orchestrator with our own inference loop
 ```
 
 ### 1.1 Key Build Details
 
 build.rs responsibilities:
 - Detect host triple (x86_64-apple-darwin, aarch64-apple-darwin, etc.)
-- Set CMAKE_OSX_ARCHITECTURES on macOS cross-compilation
+- Set CMAKE_OSX_DEPLOYMENT_TARGET to auto-detected macOS version
 - Enable backend-specific flags for cmake:
   - macOS: -DLLAMA_METAL=ON
   - Linux with NVIDIA: -DLLAMA_CUDA=ON
   - Linux generic: -DLLAMA_VULKAN=ON or CPU only
-- Compile examples/main/main.cpp with anvil_llama_main() instead of main()
-- Emit cargo:rustc-link-lib=static=llama and search paths
+- Build ONLY libllama.a (no main.cpp, no examples)
+- Emit cargo:rustc-link-search and cargo:rustc-link-lib for all static libs
+- Link required frameworks: Metal, Foundation, Accelerate, QuartzCore, CoreFoundation
+- Link C++ standard library: -lc++
+- Link Objective-C runtime: -lobjc
 
-Why patch main.cpp?
-Because main.cpp already implements EVERYTHING: argument parsing, tokenization, chat templates, the full decode loop, all samplers, all output formatting. By renaming main() to anvil_llama_main(), we get all of that for free. No reimplementation. No missing features.
+### 1.2 Why NOT main.cpp Passthrough
+
+Early design considered patching main.cpp to export anvil_llama_main(). This was rejected because:
+- It creates an dependency on llama.cpp's CLI argument parsing
+- It couples us to their main loop timing and output handling
+- It makes it impossible to add our own TUI, streaming, or API layers later
+- It's more complex, not less
+
+Instead, we call llama.h C API directly and write our own inference loop in Rust.
 
 ---
 
@@ -60,14 +69,11 @@ $ anvil run llama3.1.gguf --temp 0.7 --ctx 4096
 
 ```
 Step 1: Rust CLI Parsing (src/main.rs)
- + clap derives parse args
+ + clap parses friendly flags
  + Friendly flag --ctx maps to --ctx-size
  + --temp maps to --temperature
  + --ngl absent? query hardware prober
- + Build final argv: ["--model", "llama3.1.gguf",
-                     "--temperature", "0.7",
-                     "--ctx-size", "4096",
-                     "--ngl", "33"]
+ + Resolve final flags
 
 Step 2: Hardware Prober (if --ngl not specified)
  + Detect macOS + Apple Silicon -> --ngl 99, --backend metal
@@ -80,26 +86,28 @@ Step 3: Config Overlay
  + Merge CLI flags (CLI overrides config)
  + Write missing fields back to config
 
-Step 4: FFI Invocation
- + Call anvil_llama_main(argc, argv) from Rust
-   (defined in our patched main.cpp)
-
-Step 5: llama.cpp Native Execution
- + parse_args() inside main.cpp handles all flags
- + llama_model_load_from_file(model, params)
+Step 4: Model Load (Rust -> C FFI)
+ + llama_backend_init()
+ + llama_model_load_from_file(path, params)
  + llama_init_from_model(model, ctx_params)
- + Tokenize prompt, llama_decode() loop
- + Sample via llama_sampler_sample()
- + Stream tokens to stdout (raw, unbuffered)
+
+Step 5: Inference Loop (Rust -> C FFI)
+ + llama_tokenize() to encode prompt
+ + llama_decode() to process prompt
+ + While not done:
+   + llama_get_logits_ith() for last token
+   + llama_sampler_sample() to pick next token
+   + llama_token_to_piece() to convert to string
+   + Print token to stdout (streaming)
+   + llama_decode() the new token
 
 Step 6: Cleanup
  + llama_free(ctx)
  + llama_model_free(model)
- + Return control to Rust
+ + llama_backend_free()
 
 Step 7: Rust Exit
- + Print perf stats (optional)
- + Exit with llama.cpp's return code
+ + Return llama.cpp's exit code
 ```
 
 ---
@@ -108,23 +116,23 @@ Step 7: Rust Exit
 
 ### 3.1 Friendly Flags (Our Aliases)
 
-These are NOT llama.cpp flags. We map them before passing the argv array.
+These are NOT llama.cpp flags. We map them before calling the C API.
 
 | Friendly Flag | Maps To | Default |
 |---|---|---|
-| --ctx <n> | --ctx-size <n> | auto-detect |
-| --temp <f> | --temperature <f> | 0.8 |
-| --max-tokens <n> | --n-predict <n> | -1 (unlimited) |
+| --ctx <n> | ctx_size in llama_context_params | auto-detect |
+| --temp <f> | temperature in sampler chain | 0.8 |
+| --max-tokens <n> | max generation tokens | -1 (unlimited) |
 | --system "..." | prepended to prompt with chat template | (none) |
-| --prompt "..." | --prompt "..." | (required if not interactive) |
-| --interactive | --interactive-first | false |
-| --ngl <n> | --ngl <n> | auto-detect |
-| --flash-attn | --flash-attn | false (auto for Metal) |
+| --prompt "..." | raw prompt text | (required if not interactive) |
+| --interactive | enable REPL mode | false |
+| --ngl <n> | n_gpu_layers in llama_model_params | auto-detect |
+| --flash-attn | flash_attn_type in context params | false (auto for Metal) |
 | --backend <name> | backend hint (for prober) | auto-detect |
 
 ### 3.2 Raw llama.cpp Flags (Passthrough)
 
-Any flag that does not match a friendly alias is passed through verbatim to llama.cpp's parse_args(). Examples:
+Any flag that doesn't match a friendly alias is passed through verbatim to llama.cpp's parse_args(). Examples:
 
 ```bash
 anvil run model.gguf --rope-scaling yarn --yarn-ext-factor 1.0
@@ -158,12 +166,12 @@ When --ngl IS specified, we use the user's value and do not override.
 
 ### 3.5 TurboQuant KV Cache Defaults
 
-Anvil defaults to TurboQuant3 for both K and V caches when the user does not specify `--cache-type-k` or `--cache-type-v`.
+Anvil defaults to TurboQuant3 for both K and V caches when the user does not specify --cache-type-k or --cache-type-v.
 
 | Cache | Default | Rationale |
 |---|---|---|
-| K (key)   | `turbo3` | ~4.3x compression over f16, near-lossless quality |
-| V (value) | `turbo3` | ~4.3x compression over f16, near-lossless quality |
+| K (key)   | turbo3 | ~4.3x compression over f16, near-lossless quality |
+| V (value) | turbo3 | ~4.3x compression over f16, near-lossless quality |
 
 Turbo3 compresses the KV cache to ~3 bits per value using a WHT-rotated, two-stage codebook process. Perplexity stays almost identical to full f16, making it effectively near-lossless for practical workloads. At 2-bit (turbo2), quality dips become measurable; at 3-bit (turbo3), the tradeoff is negligible.
 
@@ -180,20 +188,20 @@ anvil run model.gguf --cache-type-k f16 --cache-type-v f16
 
 ```rust
 struct HardwareProfile {
-    os: OSType,                    // macOS, Linux, Windows
-    arch: Architecture,            // x86_64, aarch64
-    cpu_vendor: String,
+    os: String,                    // macOS, Linux, Windows
+    arch: String,                  // x86_64, aarch64
+    cpu: String,
     cpu_features: Vec<String>,     // "avx2", "avx512", "neon"
     ram_gb: u64,                   // Total system RAM
-    gpu: Vec<GPUInfo>,             // All detected GPUs
-    best_backend: Backend,         // metal, cuda, hip, sycl, vulkan, cpu
+    gpus: Vec<GPUInfo>,             // All detected GPUs
+    best_backend: String,           // metal, cuda, hip, sycl, vulkan, cpu
     recommended_ngl: i32,          // Layers to offload
     recommended_ctx: u32,          // Default context size
 }
 
 struct GPUInfo {
     name: String,
-    vendor: GPUVendor,             // Apple, NVIDIA, AMD, Intel
+    vendor: String,                // Apple, NVIDIA, AMD, Intel
     vram_mb: u64,                  // VRAM in MB
     is_discrete: bool,             // true for dGPU, false for iGPU
 }
@@ -202,7 +210,8 @@ struct GPUInfo {
 ### 4.2 How Detection Works (Platform-specific)
 
 macOS:
-- sysctl -n hw.model -> CPU model
+- sw_vers -productVersion -> OS version
+- sysctl -n machdep.cpu.brand_string -> CPU model
 - sysctl -n hw.memsize -> RAM
 - sysctl -n hw.optional.arm64 -> ARM64 check
 - sysctl -n hw.ncpu -> Core count
@@ -247,59 +256,81 @@ Probe result is cached in ~/.anvil/config.json.
 
 ### 5.1 Raw FFI (Rust extern "C" blocks)
 
-We declare only the C functions we need from llama.h:
-
 ```rust
 // src/engine/raw.rs
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_float, c_void};
 
 #[repr(C)]
-pub struct llama_model {
-    _private: [u8; 0],
-}
+pub struct llama_model { _private: [u8; 0] }
 
 #[repr(C)]
-pub struct llama_context {
-    _private: [u8; 0],
-}
+pub struct llama_context { _private: [u8; 0] }
+
+#[repr(C)]
+pub struct llama_vocab { _private: [u8; 0] }
+
+#[repr(C)]
+pub struct llama_sampler { _private: [u8; 0] }
+
+pub type llama_token = i32;
+pub type llama_pos = i32;
+
+// ... structs for llama_model_params, llama_context_params, llama_batch ...
 
 extern "C" {
     pub fn llama_backend_init();
     pub fn llama_backend_free();
+    pub fn llama_model_default_params() -> llama_model_params;
+    pub fn llama_context_default_params() -> llama_context_params;
     pub fn llama_model_load_from_file(path: *const c_char, ...) -> *mut llama_model;
     pub fn llama_model_free(model: *mut llama_model);
+    pub fn llama_model_get_vocab(model: *const llama_model) -> *const llama_vocab;
     pub fn llama_init_from_model(model: *mut llama_model, ...) -> *mut llama_context;
     pub fn llama_free(ctx: *mut llama_context);
-    pub fn llama_model_chat_template(model: *const llama_model, name: *const c_char) -> *const c_char;
-    pub fn llama_chat_apply_template(tmpl: *const c_char, ...) -> i32;
+    pub fn llama_tokenize(vocab: *const llama_vocab, text: *const c_char, ...) -> i32;
+    pub fn llama_token_to_piece(vocab: *const llama_vocab, token: llama_token, ...) -> i32;
+    pub fn llama_n_vocab(vocab: *const llama_vocab) -> i32;
+    pub fn llama_vocab_eos(vocab: *const llama_vocab) -> llama_token;
+    pub fn llama_batch_init(n_tokens: i32, embd: i32, n_seq_max: i32) -> llama_batch;
+    pub fn llama_batch_free(batch: llama_batch);
+    pub fn llama_decode(ctx: *mut llama_context, batch: llama_batch) -> i32;
+    pub fn llama_get_logits_ith(ctx: *mut llama_context, i: i32) -> *mut c_float;
+    pub fn llama_sampler_init_greedy() -> *mut llama_sampler;
+    pub fn llama_sampler_init_dist(seed: u32) -> *mut llama_sampler;
+    pub fn llama_sampler_accept(smpl: *mut llama_sampler, token: llama_token);
+    pub fn llama_sampler_sample(smpl: *mut llama_sampler, ctx: *mut llama_context, idx: i32) -> llama_token;
+    pub fn llama_sampler_free(smpl: *mut llama_sampler);
+    pub fn llama_set_n_threads(ctx: *mut llama_context, n_threads: i32, n_threads_batch: i32);
     pub fn llama_print_system_info() -> *const c_char;
 }
 ```
 
-### 5.2 The anvil_llama_main Entrypoint
+### 5.2 The Inference Loop
 
-Our fork's examples/main/main.cpp gets this patch:
-
-```cpp
-// examples/main/main.cpp (PATCHED)
-extern "C" int anvil_llama_main(int argc, char ** argv) {
-    // ... original main.cpp body ...
-    // Uses llama.cpp's parse_args(), the full decode loop, etc.
-    // Just the function name changed from main to anvil_llama_main
-    // and it is wrapped in extern "C"
-}
-```
-
-Rust calls it:
+Our Rust code directly calls the C API:
 
 ```rust
-// src/engine/entrypoint.rs
-extern "C" {
-    fn anvil_llama_main(argc: c_int, argv: *mut *mut c_char) -> c_int;
-}
+// Pseudocode for src/engine/mod.rs
 
-pub fn run_llama_main(args: Vec<String>) -> i32 {
-    // Convert to C strings, call anvil_llama_main
+pub fn run_inference(model_path: &str, prompt: &str, max_tokens: i32) {
+    unsafe { llama_backend_init(); }
+
+    let model = load_model(model_path);
+    let ctx = create_context(&model);
+
+    let tokens = tokenize(ctx.vocab, prompt);
+    decode_tokens(&ctx, &tokens);
+
+    for _ in 0..max_tokens {
+        let next_token = sample_next(ctx);
+        if is_eos(next_token) { break; }
+        let piece = token_to_string(ctx.vocab, next_token);
+        print!("{}", piece); // streaming output
+    }
+
+    free_context(ctx);
+    free_model(model);
+    unsafe { llama_backend_free(); }
 }
 ```
 
@@ -352,7 +383,7 @@ pub fn run_llama_main(args: Vec<String>) -> i32 {
 
 ## 7. Error Handling Strategy
 
-### 7.1 Our Errors (Rust side, before calling anvil_llama_main)
+### 7.1 Our Errors (Rust side, before calling C API)
 
 | Error | Message | Action |
 |---|---|---|
@@ -361,7 +392,7 @@ pub fn run_llama_main(args: Vec<String>) -> i32 {
 | Invalid model format | "File is not a valid GGUF" | Exit code 2 |
 | Config JSON corrupt | "Config corrupted. Delete ~/.anvil/config.json and retry." | Exit code 3 |
 
-### 7.2 llama.cpp Errors (propagated from anvil_llama_main)
+### 7.2 llama.cpp Errors (propagated from C API)
 
 | Error | Message | Action |
 |---|---|---|
@@ -390,9 +421,7 @@ Anvil/
 │       │   └── llama.h                    # C API we call via FFI
 │       ├── src/                           # llama.cpp core
 │       ├── common/                        # llama.cpp common lib
-│       └── examples/
-│           └── main/
-│               └── main.cpp               # PATCHED: exports anvil_llama_main()
+│       └── ggml/                          # ggml backend
 │
 ├── src/
 │   ├── main.rs                            # CLI entry, clap parsing, dispatch
@@ -400,15 +429,14 @@ Anvil/
 │   ├── cli.rs                             # Flag definitions, friendly to raw mapping
 │   ├── config.rs                          # ~/.anvil/config.json read/write
 │   ├── engine/
-│   │   ├── mod.rs                         # Safe wrappers (Model, Context, etc.)
-│   │   ├── raw.rs                         # Raw FFI declarations
-│   │   └── entrypoint.rs                  # Calls anvil_llama_main()
+│   │   ├── mod.rs                         # Inference loop (tokenize, decode, sample)
+│   │   └── raw.rs                         # Raw FFI declarations (extern "C" blocks)
 │   └── hardware/
 │       ├── mod.rs
 │       └── probe.rs                       # Platform-specific hardware detection
 │
 ├── Cargo.toml
-├── build.rs                               # Compiles llama.cpp + main.cpp, links everything
+├── build.rs                               # Compiles libllama.a via cmake, links everything
 ├── DESIGN.md                              # This file
 ├── PROJECT_SPEC.md                        # Full project spec
 └── README.md
@@ -457,4 +485,4 @@ v0.1 is the core engine. Everything else layers on top.
 
 ---
 
-Anvil v0.1: one binary, zero overhead, all the power of llama.cpp.
+Anvil v0.1: one binary, zero overhead, all the power of llama.cpp, controlled by us.
