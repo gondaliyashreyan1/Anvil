@@ -286,8 +286,8 @@ Anvil/
 - **Disable:** `--no-turboquant` or compile without the `turbo` feature.
 
 ### 7.2 MTP & NextN Speculative Decoding
-- **MTP (Gemma 4):** Separate assistant head loaded alongside target model. Enabled for supported models via `LLAMA_SPECULATIVE` param.
-- **NextN (Qwen 3.x):** Shared-model draft context. Enabled for `_MTP.gguf` models.
+- **MTP (Gemma 4):** Separate `gemma4_assistant` head loaded alongside the target model, cross-attending into the target's KV cache (no second context, tokenizer, or sampler). Enabled for supported models via the `--spec-type mtp` flag.
+- **NextN (Qwen 3.x):** Shared-model draft context using the `_MTP.gguf` / `qwen35*_mtp` GGUF variant. Enabled via the `--spec-type nextn` flag.
 - **Both:** Configurable at runtime. No model changes needed.
 
 ### 7.3 Hardware-Adaptive Optimization
