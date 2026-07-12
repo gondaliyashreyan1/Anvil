@@ -106,10 +106,10 @@ Anvil compiles `llama.cpp` as a static library and links it directly into a sing
 | TurboQuant | ✅ |
 | Metal / CUDA / Vulkan / CPU backends | ✅ |
 | Speculative decoding (MTP/NextN) | ✅ |
-| TUI chat (`anvil run`) | ✅ |
-| Monitoring dashboard | ✅ |
-| OpenAI API server (`anvil serve`) | ✅ |
-| Hardware auto-probe | ✅ |
+| TUI chat (`anvil run`) | 🛠️ |
+| Monitoring dashboard | 🛠️ |
+| OpenAI API server (`anvil serve`) | 🛠️ |
+| Hardware auto-probe | 🛠️ |
 | Self-updater (`anvil self-update`) | 🛠️ |
 | Cloud proxy | 🛠️ |
 | Finetuning | 🛠️ |
