@@ -49,7 +49,7 @@ static void print_usage() {
 }
 
 static void print_version() {
-    std::cout << "anvil v0.1.3 (llama-turbo with TurboQuant + MTP + NextN)" << std::endl;
+    std::cout << "anvil v0.1.4 (llama-turbo with TurboQuant + MTP + NextN)" << std::endl;
 }
 
 // ─── Model discovery ────────────────────────────────────────────────────────
