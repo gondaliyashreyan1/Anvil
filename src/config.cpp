@@ -141,7 +141,6 @@ EngineConfig load_config() {
 
     config.n_gpu_layers = static_cast<int32_t>(json_get_int(content, "n_gpu_layers", -1));
     config.n_ctx = static_cast<int32_t>(json_get_int(content, "n_ctx", 8192));
-    config.n_batch = static_cast<int32_t>(json_get_int(content, "n_batch", 512));
 
 
 
@@ -178,7 +177,6 @@ bool save_config(const EngineConfig& config) {
     file << "  \"draft_model_path\": \"" << config.draft_model_path << "\",\n";
     file << "  \"n_gpu_layers\": " << config.n_gpu_layers << ",\n";
     file << "  \"n_ctx\": " << config.n_ctx << ",\n";
-    file << "  \"n_batch\": " << config.n_batch << ",\n";
 
     file << "  \"cache_type_k\": \"" << config.cache_type_k << "\",\n";
     file << "  \"cache_type_v\": \"" << config.cache_type_v << "\",\n";
@@ -205,7 +203,6 @@ EngineConfig merge_config(const EngineConfig& base, const EngineConfig& cli) {
 
     if (cli.n_gpu_layers >= 0) merged.n_gpu_layers = cli.n_gpu_layers;
     if (cli.n_ctx > 0) merged.n_ctx = cli.n_ctx;
-    if (cli.n_batch > 0) merged.n_batch = cli.n_batch;
     if (cli.n_threads > 0) merged.n_threads = cli.n_threads;
 
     if (cli.temperature >= 0) merged.temperature = cli.temperature;

@@ -19,7 +19,6 @@ struct EngineConfig {
     int32_t n_gpu_layers     = -1;   // -1 = auto-detect
     int32_t n_gpu_layers_draft = -1;
     int32_t n_ctx            = 8192;
-    int32_t n_batch          = 512;
     int32_t n_threads        = 0;    // 0 = auto
     int32_t n_threads_batch  = 0;
 
@@ -123,13 +122,6 @@ public:
 
     // Get current token count in KV cache
     int32_t n_past() const;
-
-    // Incremental generation - appends to existing KV cache
-    GenerateResult generate_incremental(
-        const std::string& prompt,
-        const EngineConfig& config,
-        std::function<void(const std::string& token)> on_token = nullptr
-    );
 
     // Get model info
     uint64_t model_size() const;

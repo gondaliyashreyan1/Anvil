@@ -49,7 +49,7 @@ static void print_usage() {
 }
 
 static void print_version() {
-    std::cout << "anvil v0.1.4 (llama-turbo with TurboQuant + MTP + NextN)" << std::endl;
+    std::cout << "anvil v0.1.5 (llama-turbo with TurboQuant + MTP + NextN)" << std::endl;
 }
 
 // ─── Model discovery ────────────────────────────────────────────────────────
@@ -246,6 +246,7 @@ static void run_repl(anvil::Engine& engine, const anvil::EngineConfig& config) {
     std::vector<std::string> role_bufs;   // owns the role strings
     std::vector<std::string> content_bufs; // owns the content strings
 
+
     // Add system prompt if provided
     if (!config.system_prompt.empty()) {
         role_bufs.push_back("system");
@@ -262,6 +263,7 @@ static void run_repl(anvil::Engine& engine, const anvil::EngineConfig& config) {
         if (input.empty()) continue;
 
         if (input == "/clear") {
+            engine.kv_clear();
             history.clear();
             role_bufs.clear();
             content_bufs.clear();
@@ -283,12 +285,11 @@ static void run_repl(anvil::Engine& engine, const anvil::EngineConfig& config) {
         std::string formatted = format_conversation(history, engine.model_ptr());
         if (formatted.empty()) {
             std::cerr << "[anvil] failed to format conversation\n";
-            // Remove the user message we just added
             history.pop_back(); role_bufs.pop_back(); content_bufs.pop_back();
             continue;
         }
 
-        // Clear KV cache and generate with the full formatted prompt
+        // Clear KV and generate with the full formatted prompt
         engine.kv_clear();
         auto result = engine.generate(formatted, config, [](const std::string& token) {
             std::cout << token << std::flush;
