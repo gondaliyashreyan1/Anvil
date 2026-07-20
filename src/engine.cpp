@@ -297,7 +297,9 @@ GenerateResult Engine::generate(
 
     // Generation loop
     int32_t n_past = static_cast<int32_t>(tokens.size());
-    int32_t max_gen = config.max_tokens > 0 ? config.max_tokens : 4096;
+    // -1 means unlimited — generate until EOS or context limit
+    int32_t remaining = static_cast<int32_t>(config.n_ctx) - n_past;
+    int32_t max_gen = config.max_tokens > 0 ? config.max_tokens : std::max(remaining, 1);
 
     // Pre-allocate single-token batch for reuse (avoids per-token malloc/free)
     Batch gen_batch(1, 0, 1);
