@@ -1,0 +1,271 @@
+#include "anvil/engine.h"
+#include "anvil/hardware.h"
+#include "anvil/config.h"
+
+#include <iostream>
+#include <string>
+#include <cstring>
+#include <cstdlib>
+#include <csignal>
+
+// ─── Globals ────────────────────────────────────────────────────────────────
+
+static anvil::Engine g_engine;
+static volatile bool g_running = true;
+
+static void signal_handler(int /*sig*/) {
+    g_running = false;
+}
+
+// ─── Usage ──────────────────────────────────────────────────────────────────
+
+static void print_usage() {
+    std::cout << R"(
+anvil - forge anything
+
+Usage:
+  anvil run <model> [options]     Run a model with TUI
+  anvil serve [options]           Start OpenAI-compatible API server
+  anvil --version                 Show version
+  anvil --help                    Show this help
+
+Run options:
+  -m, --model <path>              Model GGUF path (or just pass as first arg)
+  --temp, --temperature <f>       Sampling temperature (default: 0.8)
+  --top-k <n>                     Top-K sampling (default: 40)
+  --top-p <f>                     Top-P sampling (default: 0.95)
+  --min-p <f>                     Min-P sampling (default: 0.05)
+  --max-tokens <n>                Max tokens to generate (default: unlimited)
+  --ctx, --context <n>            Context size (default: 8192)
+  --ngl, --gpu-layers <n>         GPU layers to offload (-1 = auto)
+  --backend <name>                Backend hint (metal/cuda/vulkan/cpu)
+  --cache-type-k <type>           K cache type (default: turbo3)
+  --cache-type-v <type>           V cache type (default: turbo3)
+  --flash-attn                    Enable flash attention
+  --no-tui                        Disable TUI, raw REPL mode
+
+Speculative decoding:
+  --spec-type <type>              Speculative type (mtp/nextn/draft-simple/none)
+  --mtp-head <path>               MTP assistant GGUF (Gemma 4)
+  --draft-block-size <n>          Draft block size (default: 4)
+  --draft-max <n>                 Max draft tokens (default: 16)
+
+System:
+  --system-prompt <text>          System prompt
+  --config <path>                 Config file path
+  --hardware                      Show detected hardware and exit
+
+Examples:
+  anvil run llama3.1
+  anvil run model.gguf --temp 0.3 --ctx 128000
+  anvil run gemma4.gguf --mtp-head assistant.gguf --spec-type mtp
+  anvil serve --port 8080
+)" << std::endl;
+}
+
+static void print_version() {
+    std::cout << "anvil v0.1.0 (llama-turbo with TurboQuant + MTP + NextN)" << std::endl;
+}
+
+// ─── Argument parsing ───────────────────────────────────────────────────────
+
+struct CliArgs {
+    std::string command;          // "run", "serve", ""
+    std::string model_path;
+    anvil::EngineConfig config;
+    bool show_help = false;
+    bool show_version = false;
+    bool show_hardware = false;
+    bool no_tui = false;
+};
+
+static CliArgs parse_args(int argc, char** argv) {
+    CliArgs args;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "--help" || arg == "-h") {
+            args.show_help = true;
+        } else if (arg == "--version" || arg == "-v") {
+            args.show_version = true;
+        } else if (arg == "--hardware") {
+            args.show_hardware = true;
+        } else if (arg == "--no-tui") {
+            args.no_tui = true;
+        } else if (arg == "--flash-attn") {
+            args.config.flash_attn = true;
+        } else if (arg == "run" || arg == "serve") {
+            args.command = arg;
+        } else if ((arg == "-m" || arg == "--model") && i + 1 < argc) {
+            args.config.model_path = argv[++i];
+        } else if ((arg == "--temp" || arg == "--temperature") && i + 1 < argc) {
+            args.config.temperature = std::stof(argv[++i]);
+        } else if (arg == "--top-k" && i + 1 < argc) {
+            args.config.top_k = std::stoi(argv[++i]);
+        } else if (arg == "--top-p" && i + 1 < argc) {
+            args.config.top_p = std::stof(argv[++i]);
+        } else if (arg == "--min-p" && i + 1 < argc) {
+            args.config.min_p = std::stof(argv[++i]);
+        } else if (arg == "--max-tokens" && i + 1 < argc) {
+            args.config.max_tokens = std::stoi(argv[++i]);
+        } else if ((arg == "--ctx" || arg == "--context") && i + 1 < argc) {
+            args.config.n_ctx = std::stoi(argv[++i]);
+        } else if ((arg == "--ngl" || arg == "--gpu-layers") && i + 1 < argc) {
+            args.config.n_gpu_layers = std::stoi(argv[++i]);
+        } else if (arg == "--backend" && i + 1 < argc) {
+            std::string backend = argv[++i];
+            if (backend == "metal") args.config.n_gpu_layers = 99;
+            else if (backend == "cuda") args.config.n_gpu_layers = 99;
+            else if (backend == "cpu") args.config.n_gpu_layers = 0;
+        } else if (arg == "--cache-type-k" && i + 1 < argc) {
+            args.config.cache_type_k = argv[++i];
+        } else if (arg == "--cache-type-v" && i + 1 < argc) {
+            args.config.cache_type_v = argv[++i];
+        } else if (arg == "--spec-type" && i + 1 < argc) {
+            args.config.spec_type = argv[++i];
+        } else if (arg == "--mtp-head" && i + 1 < argc) {
+            args.config.mtp_head_path = argv[++i];
+        } else if (arg == "--draft-block-size" && i + 1 < argc) {
+            args.config.draft_block_size = std::stoi(argv[++i]);
+        } else if (arg == "--draft-max" && i + 1 < argc) {
+            args.config.draft_max = std::stoi(argv[++i]);
+        } else if (arg == "--system-prompt" && i + 1 < argc) {
+            args.config.system_prompt = argv[++i];
+        } else if (arg == "--config" && i + 1 < argc) {
+            ++i;
+        } else if (arg == "--port" && i + 1 < argc) {
+            ++i;
+        } else if (arg[0] != '-') {
+            if (args.config.model_path.empty()) {
+                args.config.model_path = arg;
+            }
+        }
+    }
+
+    return args;
+}
+
+// ─── REPL mode ──────────────────────────────────────────────────────────────
+
+static void run_repl(anvil::Engine& engine, const anvil::EngineConfig& config) {
+    std::cout << "[anvil] REPL mode. Type your prompt and press Enter.\n";
+    std::cout << "[anvil] Type '/quit' or '/exit' to stop.\n\n";
+
+    std::string input;
+    while (g_running) {
+        std::cout << "> ";
+        if (!std::getline(std::cin, input)) break;
+
+        if (input == "/quit" || input == "/exit") break;
+        if (input.empty()) continue;
+
+        std::string full_prompt;
+        if (!config.system_prompt.empty()) {
+            full_prompt = config.system_prompt + "\n\n" + input;
+        } else {
+            full_prompt = input;
+        }
+
+        auto result = engine.generate(full_prompt, config, [](const std::string& token) {
+            std::cout << token << std::flush;
+        });
+        std::cout << "\n\n";
+
+        std::cout << "[stats] " << result.tokens_generated << " tokens"
+                  << " | " << result.prompt_eval_ms << "ms prompt"
+                  << " | " << result.eval_ms << "ms gen"
+                  << " | " << result.tokens_per_sec << " tok/s\n\n";
+    }
+}
+
+// ─── Main ───────────────────────────────────────────────────────────────────
+
+int main(int argc, char** argv) {
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+
+    auto args = parse_args(argc, argv);
+
+    if (args.show_help) { print_usage(); return 0; }
+    if (args.show_version) { print_version(); return 0; }
+
+    if (args.show_hardware) {
+        auto hw = anvil::detect_hardware();
+        hw.print();
+        return 0;
+    }
+
+    anvil::Engine::backend_init();
+
+    auto file_config = anvil::load_config();
+    auto config = anvil::merge_config(file_config, args.config);
+
+    if (config.model_path.empty()) {
+        std::cerr << "[anvil] no model specified. Use: anvil run <model>\n";
+        print_usage();
+        anvil::Engine::backend_free();
+        return 1;
+    }
+
+    if (config.n_gpu_layers < 0) {
+        auto hw = anvil::detect_hardware();
+        hw.print();
+        config.n_gpu_layers = anvil::auto_ngl(hw);
+        if (config.flash_attn && hw.best_backend == "metal") {
+            config.flash_attn = true;
+        }
+    }
+
+    std::cout << "[anvil] Loading model: " << config.model_path << "\n";
+    std::cout << "[anvil] KV cache: K=" << config.cache_type_k << " V=" << config.cache_type_v << "\n";
+    std::cout << "[anvil] GPU layers: " << config.n_gpu_layers << "\n";
+    std::cout << "[anvil] Context: " << config.n_ctx << "\n";
+
+    auto progress_cb = [](float p) -> bool {
+        std::cout << "\r[anvil] Loading... " << static_cast<int>(p * 100) << "%" << std::flush;
+        return g_running;
+    };
+
+    if (!g_engine.load_model(config, progress_cb)) {
+        std::cerr << "\n[anvil] Failed to load model\n";
+        anvil::Engine::backend_free();
+        return 1;
+    }
+    std::cout << "\n";
+
+    if (!config.mtp_head_path.empty()) {
+        std::cout << "[anvil] Loading MTP assistant: " << config.mtp_head_path << "\n";
+        if (!g_engine.load_mtp_assistant(config.mtp_head_path)) {
+            std::cerr << "[anvil] Failed to load MTP assistant\n";
+            anvil::Engine::backend_free();
+            return 1;
+        }
+    }
+
+    if (!g_engine.create_context(config)) {
+        std::cerr << "[anvil] Failed to create context\n";
+        anvil::Engine::backend_free();
+        return 1;
+    }
+
+    anvil::save_config(config);
+
+    std::cout << "[anvil] Model loaded: "
+              << (g_engine.model_size() / (1024 * 1024)) << " MB"
+              << " | " << g_engine.model_params() << " params"
+              << " | " << g_engine.n_ctx() << " ctx"
+              << " | " << g_engine.n_vocab() << " vocab\n";
+
+    if (args.command == "serve") {
+        std::cout << "[anvil] API server not yet implemented. Use REPL mode.\n";
+        run_repl(g_engine, config);
+    } else {
+        run_repl(g_engine, config);
+    }
+
+    // CRITICAL: Cleanup engine resources BEFORE backend_free to avoid Metal crash
+    g_engine.cleanup();
+    anvil::Engine::backend_free();
+    return 0;
+}

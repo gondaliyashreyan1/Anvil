@@ -1,0 +1,36 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.dylib
+*.so
+*.dll
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Models (large files, download separately)
+*.gguf
+*.bin
+models/
+
+# Config (user-specific, generated on first run)
+~/.anvil/
+
+# Temporary files
+*.tmp
+*.log
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
