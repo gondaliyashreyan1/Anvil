@@ -143,11 +143,7 @@ EngineConfig load_config() {
     config.n_ctx = static_cast<int32_t>(json_get_int(content, "n_ctx", 8192));
     config.n_batch = static_cast<int32_t>(json_get_int(content, "n_batch", 512));
 
-    config.temperature = static_cast<float>(json_get_float(content, "temperature", 0.8));
-    config.top_k = static_cast<int32_t>(json_get_int(content, "top_k", 40));
-    config.top_p = static_cast<float>(json_get_float(content, "top_p", 0.95));
-    config.min_p = static_cast<float>(json_get_float(content, "min_p", 0.05));
-    config.max_tokens = static_cast<int32_t>(json_get_int(content, "max_tokens", -1));
+
 
     config.cache_type_k = json_get_string(content, "cache_type_k");
     if (config.cache_type_k.empty()) config.cache_type_k = "turbo3";
@@ -183,11 +179,7 @@ bool save_config(const EngineConfig& config) {
     file << "  \"n_gpu_layers\": " << config.n_gpu_layers << ",\n";
     file << "  \"n_ctx\": " << config.n_ctx << ",\n";
     file << "  \"n_batch\": " << config.n_batch << ",\n";
-    file << "  \"temperature\": " << config.temperature << ",\n";
-    file << "  \"top_k\": " << config.top_k << ",\n";
-    file << "  \"top_p\": " << config.top_p << ",\n";
-    file << "  \"min_p\": " << config.min_p << ",\n";
-    file << "  \"max_tokens\": " << config.max_tokens << ",\n";
+
     file << "  \"cache_type_k\": \"" << config.cache_type_k << "\",\n";
     file << "  \"cache_type_v\": \"" << config.cache_type_v << "\",\n";
     file << "  \"flash_attn\": " << (config.flash_attn ? "true" : "false") << ",\n";

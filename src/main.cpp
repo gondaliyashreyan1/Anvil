@@ -62,7 +62,8 @@ static std::vector<std::string> discover_models() {
         return models;
     }
 
-    for (const auto& entry : std::filesystem::directory_iterator(models_dir)) {
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(models_dir, ec)) {
         if (entry.is_regular_file() && entry.path().extension() == ".gguf") {
             models.push_back(entry.path().filename().string());
         }
@@ -255,19 +256,18 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    anvil::Engine::backend_init();
-
     auto file_config = anvil::load_config();
     auto config = anvil::merge_config(file_config, args.config);
 
-    // Interactive model selection if no model specified
+    // Interactive model selection if no model specified (before backend_init to avoid Metal noise)
     if (config.model_path.empty()) {
         config.model_path = interactive_model_picker();
         if (config.model_path.empty()) {
-            anvil::Engine::backend_free();
             return 1;
         }
     }
+
+    anvil::Engine::backend_init();
 
     if (config.n_gpu_layers < 0) {
         auto hw = anvil::detect_hardware();
