@@ -4,9 +4,13 @@
 
 #include <iostream>
 #include <string>
+#include <vector>
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <csignal>
+#include <filesystem>
+#include <iomanip>
 
 // ─── Globals ────────────────────────────────────────────────────────────────
 
@@ -20,51 +24,110 @@ static void signal_handler(int /*sig*/) {
 // ─── Usage ──────────────────────────────────────────────────────────────────
 
 static void print_usage() {
-    std::cout << R"(
-anvil - forge anything
-
-Usage:
-  anvil run <model> [options]     Run a model with TUI
-  anvil serve [options]           Start OpenAI-compatible API server
-  anvil --version                 Show version
-  anvil --help                    Show this help
-
-Run options:
-  -m, --model <path>              Model GGUF path (or just pass as first arg)
-  --temp, --temperature <f>       Sampling temperature (default: 0.8)
-  --top-k <n>                     Top-K sampling (default: 40)
-  --top-p <f>                     Top-P sampling (default: 0.95)
-  --min-p <f>                     Min-P sampling (default: 0.05)
-  --max-tokens <n>                Max tokens to generate (default: unlimited)
-  --ctx, --context <n>            Context size (default: 8192)
-  --ngl, --gpu-layers <n>         GPU layers to offload (-1 = auto)
-  --backend <name>                Backend hint (metal/cuda/vulkan/cpu)
-  --cache-type-k <type>           K cache type (default: turbo3)
-  --cache-type-v <type>           V cache type (default: turbo3)
-  --flash-attn                    Enable flash attention
-  --no-tui                        Disable TUI, raw REPL mode
-
-Speculative decoding:
-  --spec-type <type>              Speculative type (mtp/nextn/draft-simple/none)
-  --mtp-head <path>               MTP assistant GGUF (Gemma 4)
-  --draft-block-size <n>          Draft block size (default: 4)
-  --draft-max <n>                 Max draft tokens (default: 16)
-
-System:
-  --system-prompt <text>          System prompt
-  --config <path>                 Config file path
-  --hardware                      Show detected hardware and exit
-
-Examples:
-  anvil run llama3.1
-  anvil run model.gguf --temp 0.3 --ctx 128000
-  anvil run gemma4.gguf --mtp-head assistant.gguf --spec-type mtp
-  anvil serve --port 8080
-)" << std::endl;
+    std::cout << "\nanvil - forge anything\n"
+              << "\nUsage:\n"
+              << "  anvil [options]                  Run with model picker (interactive)\n"
+              << "  anvil run <model> [options]       Run a specific model\n"
+              << "  anvil --version                   Show version\n"
+              << "  anvil --help                      Show this help\n"
+              << "\nRun options:\n"
+              << "  -m, --model <path>                Model GGUF path\n"
+              << "  --temp, --temperature <f>         Sampling temperature (default: 0.8)\n"
+              << "  --max-tokens <n>                  Max tokens to generate (default: unlimited)\n"
+              << "  --ctx, --context <n>              Context size (default: 8192)\n"
+              << "  --ngl, --gpu-layers <n>           GPU layers to offload (-1 = auto)\n"
+              << "  --cache-type-k <type>             K cache type (default: turbo3)\n"
+              << "  --cache-type-v <type>             V cache type (default: turbo3)\n"
+              << "  --flash-attn                      Enable flash attention\n"
+              << "  --system-prompt <text>            System prompt\n"
+              << "  --hardware                        Show detected hardware and exit\n"
+              << "\nExamples:\n"
+              << "  anvil                             # Interactive model picker\n"
+              << "  anvil run model.gguf --temp 0.3 --ctx 128000\n"
+              << "  anvil run gemma4.gguf --mtp-head assistant.gguf --spec-type mtp\n"
+              << std::endl;
 }
 
 static void print_version() {
-    std::cout << "anvil v0.1.0 (llama-turbo with TurboQuant + MTP + NextN)" << std::endl;
+    std::cout << "anvil v0.1.2 (llama-turbo with TurboQuant + MTP + NextN)" << std::endl;
+}
+
+// ─── Model discovery ────────────────────────────────────────────────────────
+
+static std::vector<std::string> discover_models() {
+    std::vector<std::string> models;
+    std::string models_dir = anvil::models_dir();
+
+    if (!std::filesystem::exists(models_dir)) {
+        return models;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(models_dir)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".gguf") {
+            models.push_back(entry.path().filename().string());
+        }
+    }
+
+    std::sort(models.begin(), models.end());
+    return models;
+}
+
+static std::string interactive_model_picker() {
+    auto models = discover_models();
+
+    if (models.empty()) {
+        std::cerr << "\n[anvil] No GGUF models found in " << anvil::models_dir() << "\n\n";
+        std::cerr << "  Download a model to get started:\n\n";
+        std::cerr << "    # Qwen 3.5 0.8B (fast, 542 MB)\n";
+        std::cerr << "    huggingface-cli download bartowski/Qwen_Qwen3.5-0.8B-GGUF \\\n";
+        std::cerr << "      --include '*Q4_K_M.gguf' \\\n";
+        std::cerr << "      --local-dir " << anvil::models_dir() << "\n\n";
+        std::cerr << "    # Or any GGUF from HuggingFace\n";
+        std::cerr << "    huggingface-cli download <repo> \\\n";
+        std::cerr << "      --include '*.gguf' \\\n";
+        std::cerr << "      --local-dir " << anvil::models_dir() << "\n\n";
+        return "";
+    }
+
+    if (models.size() == 1) {
+        std::cout << "[anvil] Found 1 model: " << models[0] << "\n";
+        return anvil::models_dir() + "/" + models[0];
+    }
+
+    std::cout << "\n[anvil] Available models:\n\n";
+    for (size_t i = 0; i < models.size(); ++i) {
+        std::error_code ec;
+        auto size = std::filesystem::file_size(anvil::models_dir() + "/" + models[i], ec);
+        if (ec) continue;
+        double mb = size / (1024.0 * 1024.0);
+        std::cout << "  " << (i + 1) << ") " << models[i];
+        if (mb >= 1024.0) {
+            std::cout << "  (" << std::fixed << std::setprecision(1) << (mb / 1024.0) << " GB)";
+        } else {
+            std::cout << "  (" << std::fixed << std::setprecision(0) << mb << " MB)";
+        }
+        std::cout << "\n";
+    }
+    std::cout << "\n  Select model [1-" << models.size() << "]: ";
+    std::cout << std::flush;
+
+    std::string input;
+    if (!std::getline(std::cin, input)) return "";
+
+    size_t choice = 0;
+    try {
+        choice = std::stoul(input);
+    } catch (...) {
+        std::cerr << "[anvil] invalid selection\n";
+        return "";
+    }
+
+    if (choice < 1 || choice > models.size()) {
+        std::cerr << "[anvil] invalid selection (1-" << models.size() << ")\n";
+        return "";
+    }
+
+    return anvil::models_dir() + "/" + models[choice - 1];
 }
 
 // ─── Argument parsing ───────────────────────────────────────────────────────
@@ -197,11 +260,13 @@ int main(int argc, char** argv) {
     auto file_config = anvil::load_config();
     auto config = anvil::merge_config(file_config, args.config);
 
+    // Interactive model selection if no model specified
     if (config.model_path.empty()) {
-        std::cerr << "[anvil] no model specified. Use: anvil run <model>\n";
-        print_usage();
-        anvil::Engine::backend_free();
-        return 1;
+        config.model_path = interactive_model_picker();
+        if (config.model_path.empty()) {
+            anvil::Engine::backend_free();
+            return 1;
+        }
     }
 
     if (config.n_gpu_layers < 0) {
