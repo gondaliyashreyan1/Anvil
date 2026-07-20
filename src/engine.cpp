@@ -142,7 +142,7 @@ bool Engine::create_context(const EngineConfig& config) {
 
     auto cparams = llama_context_default_params();
     cparams.n_ctx = config.n_ctx;
-    cparams.n_batch = config.n_batch;
+    cparams.n_batch = config.n_ctx;  // n_batch = n_ctx so entire prompt fits in one pass
     cparams.n_threads = config.n_threads > 0 ? config.n_threads :
                         static_cast<int32_t>(std::thread::hardware_concurrency());
     cparams.n_threads_batch = config.n_threads_batch > 0 ? config.n_threads_batch :
