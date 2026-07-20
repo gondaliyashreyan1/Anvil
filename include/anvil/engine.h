@@ -97,10 +97,13 @@ public:
     std::string detokenize(const llama_token* tokens, int32_t n_tokens);
 
     // Generate text from prompt
+    // If apply_template is true, the model's chat template is applied automatically.
+    // Set to false when passing already-formatted text (e.g. from llama_chat_apply_template).
     GenerateResult generate(
         const std::string& prompt,
         const EngineConfig& config,
-        std::function<void(const std::string& token)> on_token = nullptr
+        std::function<void(const std::string& token)> on_token = nullptr,
+        bool apply_template = true
     );
 
     // Single decode step
@@ -118,6 +121,16 @@ public:
     // Clear KV cache
     void kv_clear();
 
+    // Get current token count in KV cache
+    int32_t n_past() const;
+
+    // Incremental generation - appends to existing KV cache
+    GenerateResult generate_incremental(
+        const std::string& prompt,
+        const EngineConfig& config,
+        std::function<void(const std::string& token)> on_token = nullptr
+    );
+
     // Get model info
     uint64_t model_size() const;
     uint64_t model_params() const;
@@ -128,6 +141,9 @@ public:
     bool is_loaded() const { return model_ != nullptr; }
     bool has_context() const { return ctx_ != nullptr; }
     bool has_mtp() const { return mtp_assistant_ != nullptr; }
+
+    // Access underlying llama objects (for chat template, etc.)
+    const llama_model* model_ptr() const { return model_.get(); }
 
 private:
     UniqueModel model_;
@@ -145,6 +161,7 @@ private:
     ProgressCallback progress_cb_;
 
     bool embeddings_enabled_ = false;
+    int32_t n_past_ = 0;
 };
 
 } // namespace anvil

@@ -246,10 +246,14 @@ void Engine::kv_clear() {
         auto mem = llama_get_memory(ctx_.get());
         llama_memory_clear(mem, true);
     }
-    // Reset sampler state between turns
     if (sampler_) {
         llama_sampler_reset(sampler_.get());
     }
+    n_past_ = 0;
+}
+
+int32_t Engine::n_past() const {
+    return n_past_;
 }
 
 // ─── Generation ─────────────────────────────────────────────────────────────
@@ -257,7 +261,8 @@ void Engine::kv_clear() {
 GenerateResult Engine::generate(
     const std::string& prompt,
     const EngineConfig& config,
-    std::function<void(const std::string&)> on_token
+    std::function<void(const std::string&)> on_token,
+    bool apply_template
 ) {
     GenerateResult result;
 
@@ -268,9 +273,9 @@ GenerateResult Engine::generate(
 
     auto t_start = std::chrono::high_resolution_clock::now();
 
-    // Apply chat template if the model has one
+    // Apply chat template if requested and the model has one
     std::string formatted = prompt;
-    {
+    if (apply_template) {
         const char* tmpl = llama_model_chat_template(model_.get(), nullptr);
         if (tmpl && tmpl[0]) {
             llama_chat_message msg = {"user", prompt.c_str()};
@@ -284,6 +289,7 @@ GenerateResult Engine::generate(
     }
 
     // Tokenize prompt
+    // Note: add_special=false because the chat template (if used) already handles BOS.
     auto tokens = tokenize(formatted, false, true);
     if (tokens.empty()) {
         std::cerr << "[anvil] tokenization failed\n";
@@ -315,9 +321,9 @@ GenerateResult Engine::generate(
     result.prompt_eval_ms = std::chrono::duration<float, std::milli>(t_prompt_end - t_start).count();
 
     // Generation loop
-    int32_t n_past = static_cast<int32_t>(tokens.size());
+    n_past_ = static_cast<int32_t>(tokens.size());
     // -1 means unlimited — generate until EOS or context limit
-    int32_t remaining = static_cast<int32_t>(config.n_ctx) - n_past;
+    int32_t remaining = static_cast<int32_t>(config.n_ctx) - n_past_;
     int32_t max_gen = config.max_tokens > 0 ? config.max_tokens : std::max(remaining, 1);
 
     // Pre-allocate single-token batch for reuse (avoids per-token malloc/free)
@@ -347,7 +353,7 @@ GenerateResult Engine::generate(
 
         // Reuse pre-allocated batch
         gb->token[0] = id;
-        gb->pos[0] = n_past;
+        gb->pos[0] = n_past_;
 
         int32_t ret = decode(*gb);
         if (ret < 0) {
@@ -355,7 +361,102 @@ GenerateResult Engine::generate(
             break;
         }
 
-        n_past++;
+        n_past_++;
+    }
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    result.eval_ms = std::chrono::duration<float, std::milli>(t_end - t_prompt_end).count();
+
+    if (result.eval_ms > 0) {
+        result.tokens_per_sec = result.tokens_generated * 1000.0f / result.eval_ms;
+    }
+
+    return result;
+}
+
+// ─── Incremental generation (appends to existing KV cache) ──────────────────
+
+GenerateResult Engine::generate_incremental(
+    const std::string& prompt,
+    const EngineConfig& config,
+    std::function<void(const std::string&)> on_token
+) {
+    GenerateResult result;
+
+    if (!model_ || !ctx_) {
+        std::cerr << "[anvil] engine not initialized\n";
+        return result;
+    }
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    // Tokenize only the new text (no chat template - caller handles formatting)
+    auto tokens = tokenize(prompt, false, true);
+    if (tokens.empty()) {
+        std::cerr << "[anvil] tokenization failed\n";
+        return result;
+    }
+
+    // Process new tokens starting from current n_past_
+    {
+        int32_t n_tokens = static_cast<int32_t>(tokens.size());
+        Batch batch(n_tokens, 0, 1);
+        auto* b = batch.get();
+
+        for (int32_t i = 0; i < n_tokens; ++i) {
+            b->token[i] = tokens[i];
+            b->pos[i] = static_cast<llama_pos>(n_past_ + i);
+            b->n_seq_id[i] = 1;
+            b->seq_id[i][0] = 0;
+            b->logits[i] = (i == n_tokens - 1) ? 1 : 0;
+        }
+
+        int32_t ret = decode(*b);
+        if (ret < 0) {
+            std::cerr << "[anvil] incremental decode failed: " << ret << "\n";
+            return result;
+        }
+    }
+
+    n_past_ += static_cast<int32_t>(tokens.size());
+
+    auto t_prompt_end = std::chrono::high_resolution_clock::now();
+    result.prompt_eval_ms = std::chrono::duration<float, std::milli>(t_prompt_end - t_start).count();
+
+    // Generation loop
+    int32_t remaining = static_cast<int32_t>(config.n_ctx) - n_past_;
+    int32_t max_gen = config.max_tokens > 0 ? config.max_tokens : std::max(remaining, 1);
+
+    Batch gen_batch(1, 0, 1);
+    auto* gb = gen_batch.get();
+    gb->n_seq_id[0] = 1;
+    gb->seq_id[0][0] = 0;
+    gb->logits[0] = 1;
+
+    for (int32_t i = 0; i < max_gen; ++i) {
+        llama_token id = sample();
+        if (llama_vocab_is_eog(vocab_, id)) break;
+
+        int32_t n = llama_token_to_piece(vocab_, id, detok_buf_.data(),
+                                          static_cast<int32_t>(detok_buf_.size()), 0, false);
+        if (n > 0) {
+            std::string piece(detok_buf_.data(), n);
+            result.text += piece;
+            if (on_token) on_token(piece);
+        }
+
+        result.tokens_generated++;
+
+        gb->token[0] = id;
+        gb->pos[0] = n_past_;
+
+        int32_t ret = decode(*gb);
+        if (ret < 0) {
+            std::cerr << "[anvil] decode failed: " << ret << "\n";
+            break;
+        }
+
+        n_past_++;
     }
 
     auto t_end = std::chrono::high_resolution_clock::now();

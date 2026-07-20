@@ -49,7 +49,7 @@ static void print_usage() {
 }
 
 static void print_version() {
-    std::cout << "anvil v0.1.2 (llama-turbo with TurboQuant + MTP + NextN)" << std::endl;
+    std::cout << "anvil v0.1.3 (llama-turbo with TurboQuant + MTP + NextN)" << std::endl;
 }
 
 // ─── Model discovery ────────────────────────────────────────────────────────
@@ -210,25 +210,97 @@ static CliArgs parse_args(int argc, char** argv) {
 
 // ─── REPL mode ──────────────────────────────────────────────────────────────
 
+static std::string format_conversation(
+    const std::vector<llama_chat_message>& history,
+    const llama_model* model
+) {
+    const char* tmpl = llama_model_chat_template(model, nullptr);
+    if (!tmpl || !tmpl[0]) {
+        // No template — concatenate all non-assistant messages
+        std::string result;
+        for (const auto& msg : history) {
+            if (std::string(msg.role) != "assistant") {
+                result += msg.content;
+                result += "\n";
+            }
+        }
+        return result;
+    }
+
+    int32_t n = llama_chat_apply_template(
+        tmpl, history.data(), static_cast<int32_t>(history.size()), true, nullptr, 0);
+    if (n <= 0) return {};
+
+    std::vector<char> buf(n + 1);
+    llama_chat_apply_template(
+        tmpl, history.data(), static_cast<int32_t>(history.size()), true, buf.data(), n + 1);
+    return std::string(buf.data(), n);
+}
+
 static void run_repl(anvil::Engine& engine, const anvil::EngineConfig& config) {
     std::cout << "[anvil] REPL mode. Type your prompt and press Enter.\n";
-    std::cout << "[anvil] Type '/quit' or '/exit' to stop.\n\n";
+    std::cout << "[anvil] Commands: /quit /exit /clear\n\n";
 
-    std::string input;
+    // Conversation history
+    std::vector<llama_chat_message> history;
+    std::vector<std::string> role_bufs;   // owns the role strings
+    std::vector<std::string> content_bufs; // owns the content strings
+
+    // Add system prompt if provided
+    if (!config.system_prompt.empty()) {
+        role_bufs.push_back("system");
+        content_bufs.push_back(config.system_prompt);
+        history.push_back({role_bufs.back().c_str(), content_bufs.back().c_str()});
+    }
+
     while (g_running) {
         std::cout << "> ";
+        std::string input;
         if (!std::getline(std::cin, input)) break;
 
         if (input == "/quit" || input == "/exit") break;
         if (input.empty()) continue;
 
-        // Clear KV cache between REPL turns
-        engine.kv_clear();
+        if (input == "/clear") {
+            history.clear();
+            role_bufs.clear();
+            content_bufs.clear();
+            if (!config.system_prompt.empty()) {
+                role_bufs.push_back("system");
+                content_bufs.push_back(config.system_prompt);
+                history.push_back({role_bufs.back().c_str(), content_bufs.back().c_str()});
+            }
+            std::cout << "[anvil] Conversation cleared.\n\n";
+            continue;
+        }
 
-        auto result = engine.generate(input, config, [](const std::string& token) {
+        // Add user message to history
+        role_bufs.push_back("user");
+        content_bufs.push_back(input);
+        history.push_back({role_bufs.back().c_str(), content_bufs.back().c_str()});
+
+        // Format the FULL conversation history with the model's chat template
+        std::string formatted = format_conversation(history, engine.model_ptr());
+        if (formatted.empty()) {
+            std::cerr << "[anvil] failed to format conversation\n";
+            // Remove the user message we just added
+            history.pop_back(); role_bufs.pop_back(); content_bufs.pop_back();
+            continue;
+        }
+
+        // Clear KV cache and generate with the full formatted prompt
+        engine.kv_clear();
+        auto result = engine.generate(formatted, config, [](const std::string& token) {
             std::cout << token << std::flush;
-        });
+        }, /*apply_template=*/false);
         std::cout << "\n\n";
+
+        // Add assistant response to history
+        if (!result.text.empty()) {
+            role_bufs.push_back("assistant");
+            content_bufs.push_back(result.text);
+            history.push_back({role_bufs.back().c_str(), content_bufs.back().c_str()});
+        }
 
         std::cout << "[stats] " << result.tokens_generated << " tokens"
                   << " | " << result.prompt_eval_ms << "ms prompt"
