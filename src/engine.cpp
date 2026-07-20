@@ -201,9 +201,9 @@ bool Engine::create_context(const EngineConfig& config) {
 
 // ─── Tokenization ───────────────────────────────────────────────────────────
 
-std::vector<llama_token> Engine::tokenize(const std::string& text, bool add_special) {
+std::vector<llama_token> Engine::tokenize(const std::string& text, bool add_special, bool parse_special) {
     if (!vocab_) return {};
-    return anvil::tokenize(vocab_, text, add_special);
+    return anvil::tokenize(vocab_, text, add_special, parse_special);
 }
 
 std::string Engine::detokenize(const llama_token* tokens, int32_t n_tokens) {
@@ -246,6 +246,10 @@ void Engine::kv_clear() {
         auto mem = llama_get_memory(ctx_.get());
         llama_memory_clear(mem, true);
     }
+    // Reset sampler state between turns
+    if (sampler_) {
+        llama_sampler_reset(sampler_.get());
+    }
 }
 
 // ─── Generation ─────────────────────────────────────────────────────────────
@@ -264,8 +268,23 @@ GenerateResult Engine::generate(
 
     auto t_start = std::chrono::high_resolution_clock::now();
 
+    // Apply chat template if the model has one
+    std::string formatted = prompt;
+    {
+        const char* tmpl = llama_model_chat_template(model_.get(), nullptr);
+        if (tmpl && tmpl[0]) {
+            llama_chat_message msg = {"user", prompt.c_str()};
+            int32_t n = llama_chat_apply_template(tmpl, &msg, 1, true, nullptr, 0);
+            if (n > 0) {
+                std::vector<char> buf(n + 1);
+                llama_chat_apply_template(tmpl, &msg, 1, true, buf.data(), n + 1);
+                formatted = std::string(buf.data(), n);
+            }
+        }
+    }
+
     // Tokenize prompt
-    auto tokens = tokenize(prompt, true);
+    auto tokens = tokenize(formatted, false, true);
     if (tokens.empty()) {
         std::cerr << "[anvil] tokenization failed\n";
         return result;

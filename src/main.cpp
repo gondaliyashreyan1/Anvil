@@ -160,14 +160,10 @@ static void run_repl(anvil::Engine& engine, const anvil::EngineConfig& config) {
         if (input == "/quit" || input == "/exit") break;
         if (input.empty()) continue;
 
-        std::string full_prompt;
-        if (!config.system_prompt.empty()) {
-            full_prompt = config.system_prompt + "\n\n" + input;
-        } else {
-            full_prompt = input;
-        }
+        // Clear KV cache between REPL turns
+        engine.kv_clear();
 
-        auto result = engine.generate(full_prompt, config, [](const std::string& token) {
+        auto result = engine.generate(input, config, [](const std::string& token) {
             std::cout << token << std::flush;
         });
         std::cout << "\n\n";

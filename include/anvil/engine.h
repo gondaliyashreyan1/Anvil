@@ -91,7 +91,7 @@ public:
     bool create_context(const EngineConfig& config);
 
     // Tokenize text
-    std::vector<llama_token> tokenize(const std::string& text, bool add_special = false);
+    std::vector<llama_token> tokenize(const std::string& text, bool add_special = false, bool parse_special = false);
 
     // Detokenize tokens to text
     std::string detokenize(const llama_token* tokens, int32_t n_tokens);
