@@ -79,13 +79,11 @@ static std::string interactive_model_picker() {
     if (models.empty()) {
         std::cerr << "\n[anvil] No GGUF models found in " << anvil::models_dir() << "\n\n";
         std::cerr << "  Download a model to get started:\n\n";
-        std::cerr << "    # Qwen 3.5 0.8B (fast, 542 MB)\n";
-        std::cerr << "    huggingface-cli download bartowski/Qwen_Qwen3.5-0.8B-GGUF \\\n";
-        std::cerr << "      --include '*Q4_K_M.gguf' \\\n";
+        std::cerr << "    # Bonsai 27B (Q1, 3.5 GB)\n";
+        std::cerr << "    hf download prism-ml/Bonsai-27B-gguf Bonsai-27B-Q1_0.gguf \\\n";
         std::cerr << "      --local-dir " << anvil::models_dir() << "\n\n";
         std::cerr << "    # Or any GGUF from HuggingFace\n";
-        std::cerr << "    huggingface-cli download <repo> \\\n";
-        std::cerr << "      --include '*.gguf' \\\n";
+        std::cerr << "    hf download <repo> <file.gguf> \\\n";
         std::cerr << "      --local-dir " << anvil::models_dir() << "\n\n";
         return "";
     }
