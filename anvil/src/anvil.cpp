@@ -1,12 +1,5 @@
-// anvil.cpp — Forge anything.
-// Single-file local AI runtime. Links llama.cpp natively. Zero Rust. Zero jank.
-//
-// Build: cmake --build build --target anvil
-// Usage: anvil run model.gguf [--ctx 8192] [--ngl 99] [--temp 0.8]
-
 #include "llama.h"
 #include "ggml.h"
-
 #include <algorithm>
 #include <atomic>
 #include <clocale>
@@ -20,19 +13,15 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-// Platform-specific GPU detection
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 #include <IOKit/IOKitLib.h>
 #endif
-
 #ifdef __linux__
 #include <glob.h>
 #include <fstream>
 #include <regex>
 #endif
-
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -44,10 +33,6 @@
 #include <dxgi.h>
 #pragma comment(lib, "dxgi.lib")
 #endif
-
-// ---------------------------------------------------------------------------
-// ASCII logo
-// ---------------------------------------------------------------------------
 static const char * ANVIL_LOGO = R"(
    ░███                          ░██░██ 
   ░██░██                            ░██ 
@@ -57,12 +42,7 @@ static const char * ANVIL_LOGO = R"(
 ░██    ░██ ░██    ░██   ░██░██   ░██░██ 
 ░██    ░██ ░██    ░██    ░███    ░██░██
 )";
-
-// ---------------------------------------------------------------------------
-// Signal handling (Ctrl+C)
-// ---------------------------------------------------------------------------
 static std::atomic<bool> g_interrupted{false};
-
 static void signal_handler(int) {
     if (g_interrupted.load()) {
         fprintf(stdout, "\033[0m\n");
@@ -71,20 +51,12 @@ static void signal_handler(int) {
     }
     g_interrupted.store(true);
 }
-
-// ---------------------------------------------------------------------------
-// GPU info
-// ---------------------------------------------------------------------------
 struct GPUInfo {
     std::string name;
-    std::string vendor;  // "NVIDIA", "AMD", "Intel", "Apple"
+    std::string vendor;  
     uint64_t vram_mb = 0;
     bool is_discrete = false;
 };
-
-// ---------------------------------------------------------------------------
-// Config (~/.anvil/config.json)
-// ---------------------------------------------------------------------------
 struct AnvilConfig {
     int  ngl         = 99;
     int  n_ctx       = 8192;
@@ -94,17 +66,14 @@ struct AnvilConfig {
     bool no_turbo    = false;
     std::string model;
 };
-
 static std::string config_dir() {
     const char * home = getenv("HOME");
     if (!home) home = ".";
     return std::string(home) + "/.anvil";
 }
-
 static std::string config_path() {
     return config_dir() + "/config.json";
 }
-
 static void write_config(const AnvilConfig & cfg) {
     namespace fs = std::filesystem;
     fs::create_directories(config_dir());
@@ -120,7 +89,6 @@ static void write_config(const AnvilConfig & cfg) {
     f << "  \"model\": \"" << cfg.model << "\"\n";
     f << "}\n";
 }
-
 static std::string json_get(const std::string & json, const std::string & key) {
     auto pos = json.find("\"" + key + "\"");
     if (pos == std::string::npos) return "";
@@ -138,7 +106,6 @@ static std::string json_get(const std::string & json, const std::string & key) {
     while (end < json.size() && json[end] != ',' && json[end] != '}' && json[end] != '\n') end++;
     return json.substr(pos, end - pos);
 }
-
 static AnvilConfig load_config() {
     AnvilConfig cfg;
     std::ifstream f(config_path());
@@ -160,10 +127,6 @@ static AnvilConfig load_config() {
     if (!s.empty()) cfg.model = s;
     return cfg;
 }
-
-// ---------------------------------------------------------------------------
-// Hardware probe — cross-platform
-// ---------------------------------------------------------------------------
 struct HWInfo {
     std::string os;
     std::string arch;
@@ -172,8 +135,6 @@ struct HWInfo {
     std::vector<GPUInfo> gpus;
     bool apple_silicon = false;
 };
-
-// --- macOS GPU detection via IOKit ---
 #ifdef __APPLE__
 static void detect_gpus_macos(HWInfo & hw) {
     CFMutableDictionaryRef matching = IOServiceMatching("IOGPU");
@@ -190,21 +151,17 @@ static void detect_gpus_macos(HWInfo & hw) {
         CFTypeRef name_ref = IORegistryEntrySearchCFProperty(
             device, kIOServicePlane, CFSTR("gpu-id"),
             kCFAllocatorDefault, kIORegistryIterateRecursively);
-        // Apple GPUs don't expose VRAM separately (unified memory), get from sysctl
         uint64_t mem = 0;
         size_t mem_len = sizeof(mem);
         sysctlbyname("hw.memsize", &mem, &mem_len, nullptr, 0);
         gpu.vram_mb = mem / (1024 * 1024);
         gpu.name = hw.cpu + " GPU";
-
         hw.gpus.push_back(gpu);
         IOObjectRelease(device);
     }
     IOObjectRelease(iter);
 }
 #endif
-
-// --- Linux GPU detection via nvidia-smi and /sys/class/drm ---
 #ifdef __linux__
 static void run_cmd(const char * cmd, std::string & out) {
     FILE * pipe = popen(cmd, "r");
@@ -213,9 +170,7 @@ static void run_cmd(const char * cmd, std::string & out) {
     while (fgets(buf, sizeof(buf), pipe)) out += buf;
     pclose(pipe);
 }
-
 static void detect_gpus_linux(HWInfo & hw) {
-    // NVIDIA via nvidia-smi
     {
         std::string out;
         run_cmd("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null", out);
@@ -228,7 +183,6 @@ static void detect_gpus_linux(HWInfo & hw) {
                 GPUInfo gpu;
                 gpu.vendor = "NVIDIA";
                 gpu.is_discrete = true;
-                // Format: "NVIDIA GeForce RTX 4090, 24564"
                 auto comma = line.rfind(',');
                 if (comma != std::string::npos) {
                     gpu.name = line.substr(0, comma);
@@ -241,8 +195,6 @@ static void detect_gpus_linux(HWInfo & hw) {
             }
         }
     }
-
-    // AMD / Intel via /sys/class/drm
     {
         glob_t globbuf;
         if (glob("/sys/class/drm/card*/device/vendor", 0, nullptr, &globbuf) == 0) {
@@ -250,18 +202,14 @@ static void detect_gpus_linux(HWInfo & hw) {
                 std::ifstream vf(globbuf.gl_pathv[i]);
                 std::string vendor_id;
                 std::getline(vf, vendor_id);
-                // Trim
                 while (!vendor_id.empty() && vendor_id.back() <= ' ') vendor_id.pop_back();
-
                 std::string device_path = std::string(globbuf.gl_pathv[i]).substr(0,
                     std::string(globbuf.gl_pathv[i]).rfind("/device/vendor"));
                 device_path += "/device";
-
                 std::ifstream df(device_path);
                 std::string device_id;
                 std::getline(df, device_id);
                 while (!device_id.empty() && device_id.back() <= ' ') device_id.pop_back();
-
                 GPUInfo gpu;
                 if (vendor_id == "0x1002") {
                     gpu.vendor = "AMD";
@@ -275,9 +223,6 @@ static void detect_gpus_linux(HWInfo & hw) {
                     globfree(&globbuf);
                     continue;
                 }
-
-                // Try to get VRAM via sysfs
-                // Extract card dir: /sys/class/drm/cardN/device/vendor -> /sys/class/drm/cardN/
                 std::string vendor_path(globbuf.gl_pathv[i]);
                 std::string card_dir = vendor_path.substr(0, vendor_path.rfind("/device"));
                 std::string vram_path = card_dir + "/device/mem_info_vram_total";
@@ -287,7 +232,6 @@ static void detect_gpus_linux(HWInfo & hw) {
                     vf2 >> bytes;
                     gpu.vram_mb = bytes / (1024 * 1024);
                 }
-
                 hw.gpus.push_back(gpu);
             }
             globfree(&globbuf);
@@ -295,19 +239,15 @@ static void detect_gpus_linux(HWInfo & hw) {
     }
 }
 #endif
-
-// --- Windows GPU detection via DXGI ---
 #ifdef _WIN32
 static void detect_gpus_windows(HWInfo & hw) {
     IDXGIFactory * factory = nullptr;
     if (CreateDXGIFactory(__uuidof(IDXGIFactory), (void **)&factory) != S_OK) return;
-
     IDXGIAdapter * adapter = nullptr;
     for (UINT i = 0; factory->EnumAdapters(i, &adapter) != DXGI_ERROR_NOT_FOUND; i++) {
         DXGI_ADAPTER_DESC desc;
         if (adapter->GetDesc(&desc) == S_OK) {
             GPUInfo gpu;
-            // Convert wchar name
             char name_buf[256];
             wcstombs(name_buf, desc.Description, sizeof(name_buf));
             gpu.name = name_buf;
@@ -324,11 +264,8 @@ static void detect_gpus_windows(HWInfo & hw) {
     factory->Release();
 }
 #endif
-
 static HWInfo probe_hw() {
     HWInfo hw;
-
-    // OS
 #if defined(__APPLE__)
     hw.os = "macos";
 #elif defined(__linux__)
@@ -338,8 +275,6 @@ static HWInfo probe_hw() {
 #else
     hw.os = "unknown";
 #endif
-
-    // Arch
 #if defined(__aarch64__) || defined(_M_ARM64)
     hw.arch = "aarch64";
 #elif defined(__x86_64__) || defined(_M_X64)
@@ -349,8 +284,6 @@ static HWInfo probe_hw() {
 #else
     hw.arch = "unknown";
 #endif
-
-    // CPU + RAM (platform-specific)
 #ifdef __APPLE__
     {
         char buf[256];
@@ -400,7 +333,6 @@ static HWInfo probe_hw() {
         SYSTEM_INFO si;
         GetSystemInfo(&si);
         hw.arch = (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64) ? "aarch64" : "x86_64";
-        // CPU name via registry would be complex; use generic
         hw.cpu = "Unknown CPU";
     }
     {
@@ -415,23 +347,16 @@ static HWInfo probe_hw() {
 
     return hw;
 }
-
-// ---------------------------------------------------------------------------
-// Smart defaults from hardware
-// ---------------------------------------------------------------------------
 static int derive_ngl(const HWInfo & hw) {
     if (hw.apple_silicon) return 99;
-    // Check for discrete NVIDIA/AMD GPUs
     for (const auto & gpu : hw.gpus) {
         if (gpu.is_discrete && gpu.vram_mb >= 4096) return 99;
     }
-    // Integrated GPU with decent VRAM
     for (const auto & gpu : hw.gpus) {
-        if (gpu.vram_mb >= 2048) return 99;
+        if (gpu.vram_mb >= 4096) return 99;
     }
-    return 0; // CPU only
+    return 0; 
 }
-
 static int derive_ctx(uint64_t ram_bytes) {
     uint64_t gb = ram_bytes / (1024ULL * 1024 * 1024);
     if (gb >= 48) return 131072;
@@ -439,10 +364,6 @@ static int derive_ctx(uint64_t ram_bytes) {
     if (gb >= 12) return 32768;
     return 8192;
 }
-
-// ---------------------------------------------------------------------------
-// CLI parsing
-// ---------------------------------------------------------------------------
 struct CliArgs {
     std::string model;
     int  n_ctx       = 0;
@@ -458,7 +379,6 @@ struct CliArgs {
     std::string prompt;
     int  max_tokens  = 4096;
 };
-
 static void print_usage() {
     printf("anvil — Forge anything.\n\n");
     printf("Usage:\n");
