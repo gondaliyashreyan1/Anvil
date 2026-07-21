@@ -1,0 +1,23 @@
+# Build
+build/
+cmake-build-*/
+
+# Models (too large for git)
+*.gguf
+
+# System
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Rust (legacy)
+target/
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+
+# Graphify cache
+graphify-out/
