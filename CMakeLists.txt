@@ -35,6 +35,17 @@ endif()
 
 add_subdirectory(${LLAMA_DIR} ${CMAKE_BINARY_DIR}/llama-build EXCLUDE_FROM_ALL)
 
+# --- FTXUI (terminal UI library) ---
+include(FetchContent)
+FetchContent_Declare(ftxui
+    GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI
+    GIT_TAG        v7.0.1
+    GIT_SHALLOW    TRUE
+)
+set(FTXUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(FTXUI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(ftxui)
+
 # --- Build anvil ---
 add_executable(anvil anvil/src/anvil.cpp)
 
@@ -43,7 +54,7 @@ target_include_directories(anvil PRIVATE
     ${LLAMA_DIR}/ggml/include
 )
 
-target_link_libraries(anvil PRIVATE llama)
+target_link_libraries(anvil PRIVATE llama ftxui::ftxui)
 
 # Platform-specific link flags
 if(APPLE)

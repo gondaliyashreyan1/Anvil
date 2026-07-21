@@ -1,5 +1,8 @@
 #include "llama.h"
 #include "ggml.h"
+#include <ftxui/component/component.hpp>
+#include <ftxui/component/screen_interactive.hpp>
+#include <ftxui/dom/elements.hpp>
 #include <algorithm>
 #include <atomic>
 #include <clocale>
@@ -154,8 +157,8 @@ static void detect_gpus_macos(HWInfo & hw) {
         uint64_t mem = 0;
         size_t mem_len = sizeof(mem);
         sysctlbyname("hw.memsize", &mem, &mem_len, nullptr, 0);
-        gpu.vram_mb = mem / (1024 * 1024);
-        gpu.name = hw.cpu + " GPU";
+        gpu.vram_mb = 0; // unified memory on Apple Silicon
+        gpu.name = "Apple GPU (unified " + std::to_string(hw.ram_bytes / (1024ULL * 1024 * 1024)) + " GB)";
         hw.gpus.push_back(gpu);
         IOObjectRelease(device);
     }
@@ -357,13 +360,7 @@ static int derive_ngl(const HWInfo & hw) {
     }
     return 0; 
 }
-static int derive_ctx(uint64_t ram_bytes) {
-    uint64_t gb = ram_bytes / (1024ULL * 1024 * 1024);
-    if (gb >= 48) return 131072;
-    if (gb >= 24) return 65536;
-    if (gb >= 12) return 32768;
-    return 8192;
-}
+// derive_ctx removed — context size is now model-driven, chosen in TUI
 struct CliArgs {
     std::string model;
     int  n_ctx       = 0;
@@ -433,6 +430,146 @@ static CliArgs parse_args(int argc, char ** argv) {
 }
 
 // ---------------------------------------------------------------------------
+// First-run setup TUI (FTXUI)
+// ---------------------------------------------------------------------------
+static bool config_exists() {
+    std::ifstream f(config_path());
+    return f.good();
+}
+
+static AnvilConfig run_setup_tui(const HWInfo & hw, int max_ctx) {
+    AnvilConfig cfg;
+    cfg.ngl = derive_ngl(hw);
+    cfg.n_ctx = 8192; // sensible default
+
+    // Power-of-2 context sizes from 2K to model's max + custom
+    std::vector<int> ctx_options;
+    for (int c = 2048; c <= max_ctx; c *= 2)
+        ctx_options.push_back(c);
+    ctx_options.push_back(0); // custom placeholder
+    int custom_idx = (int)ctx_options.size() - 1;
+
+    int ctx_idx = 0;
+    for (size_t i = 0; i < ctx_options.size(); i++)
+        if (ctx_options[i] == cfg.n_ctx) { ctx_idx = (int)i; break; }
+
+    std::vector<std::string> ctx_labels;
+    for (int c : ctx_options) {
+        if (c == 0)
+            ctx_labels.push_back("Custom...");
+        else
+            ctx_labels.push_back(std::to_string(c / 1024) + "K tokens");
+    }
+
+    std::vector<std::string> kv_labels = {"turbo4/turbo3 (recommended)", "turbo3/turbo3 (more compression)", "f16 (no compression)"};
+    std::vector<std::string> fa_labels = {"on (recommended)", "off"};
+    std::vector<std::string> temp_labels = {"0.7 (focused)", "0.8 (balanced)", "0.9 (creative)", "1.0 (wild)"};
+
+    int ctx_sel = ctx_idx;
+    int kv_sel = 0;
+    int fa_sel = 0;
+    int temp_sel = 1;
+
+    std::vector<std::string> hw_lines;
+    hw_lines.push_back("CPU  : " + hw.cpu);
+    hw_lines.push_back("RAM  : " + std::to_string(hw.ram_bytes / (1024ULL * 1024 * 1024)) + " GB");
+    for (const auto & gpu : hw.gpus)
+        hw_lines.push_back("GPU  : " + gpu.name + " (" + std::to_string(gpu.vram_mb) + " MB)");
+
+    auto screen = ftxui::ScreenInteractive::FitComponent();
+
+    // Navigation state: menu_idx = which setting is active
+    // Each setting has its own sel_idx
+    std::vector<int*> sels = {&ctx_sel, &kv_sel, &fa_sel, &temp_sel};
+    std::vector<int> sizes = {(int)ctx_labels.size(), (int)kv_labels.size(), (int)fa_labels.size(), (int)temp_labels.size()};
+    int menu_idx = 0;
+
+    auto component = ftxui::Renderer([&]() {
+        ftxui::Elements rows;
+
+        rows.push_back(ftxui::text(ANVIL_LOGO) | ftxui::bold | ftxui::color(ftxui::Color::Yellow));
+        rows.push_back(ftxui::text("  First-time setup") | ftxui::bold | ftxui::color(ftxui::Color::Cyan));
+        rows.push_back(ftxui::text(" "));
+
+        rows.push_back(ftxui::text("  Detected hardware:") | ftxui::bold);
+        for (const auto & line : hw_lines)
+            rows.push_back(ftxui::text("    " + line));
+        rows.push_back(ftxui::text(" "));
+
+        // Helper lambda to render a setting section
+        auto render_setting = [&](const std::string & label, const std::vector<std::string> & opts, int sel, int idx) {
+            rows.push_back(ftxui::text("  " + label) | ftxui::bold);
+            for (int i = 0; i < (int)opts.size(); i++) {
+                bool active = (idx == menu_idx);
+                bool selected = (i == sel);
+                auto prefix = selected ? ftxui::text("    ▸ ") | ftxui::bold | ftxui::color(ftxui::Color::Green)
+                                       : ftxui::text("    · ");
+                auto label_el = ftxui::text(opts[i]);
+                if (selected && active)
+                    label_el = label_el | ftxui::bold | ftxui::color(ftxui::Color::Green);
+                else if (selected)
+                    label_el = label_el | ftxui::color(ftxui::Color::Green);
+                rows.push_back(ftxui::hbox({prefix, label_el}));
+            }
+            rows.push_back(ftxui::text(" "));
+        };
+
+        render_setting("Context size", ctx_labels, ctx_sel, 0);
+        render_setting("KV cache compression", kv_labels, kv_sel, 1);
+        render_setting("Flash attention", fa_labels, fa_sel, 2);
+        render_setting("Temperature", temp_labels, temp_sel, 3);
+
+        rows.push_back(ftxui::text("  Tab switch  ↑/↓ change value  Enter confirm  q cancel") | ftxui::dim);
+
+        return ftxui::vbox(std::move(rows));
+    });
+
+    auto wrapped = component | ftxui::CatchEvent([&](ftxui::Event e) {
+        if (e == ftxui::Event::Character('q')) { screen.Exit(); return true; }
+        if (e == ftxui::Event::Return) { screen.Exit(); return true; }
+        if (e == ftxui::Event::Tab) {
+            menu_idx = (menu_idx + 1) % 4;
+            return true;
+        }
+        if (e == ftxui::Event::TabReverse) {
+            menu_idx = (menu_idx - 1 + 4) % 4;
+            return true;
+        }
+        if (e == ftxui::Event::ArrowUp) {
+            auto & sel = *sels[menu_idx];
+            sel = (sel - 1 + sizes[menu_idx]) % sizes[menu_idx];
+            return true;
+        }
+        if (e == ftxui::Event::ArrowDown) {
+            auto & sel = *sels[menu_idx];
+            sel = (sel + 1) % sizes[menu_idx];
+            return true;
+        }
+        return false;
+    });
+    screen.Loop(wrapped);
+
+    if (ctx_sel == custom_idx) {
+        printf("\033[?25h");
+        printf("Enter context size (tokens): ");
+        fflush(stdout);
+        std::string input;
+        std::getline(std::cin, input);
+        cfg.n_ctx = std::stoi(input);
+    } else {
+        cfg.n_ctx = ctx_options[ctx_sel];
+    }
+    if (kv_sel == 0)      cfg.no_turbo = false;
+    else if (kv_sel == 1) cfg.no_turbo = false;
+    else                  cfg.no_turbo = true;
+    cfg.flash_attn = (fa_sel == 0);
+    float temps[] = {0.7f, 0.8f, 0.9f, 1.0f};
+    cfg.temp = temps[temp_sel];
+
+    return cfg;
+}
+
+// ---------------------------------------------------------------------------
 // GGUF validation
 // ---------------------------------------------------------------------------
 static bool validate_gguf(const std::string & path) {
@@ -472,6 +609,43 @@ static int run_chat(const CliArgs & cli, const AnvilConfig & cfg) {
     }
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
+
+    // --- Parameter verification ---
+    int32_t n_ctx_train = llama_model_n_ctx_train(model);
+    bool has_encoder = llama_model_has_encoder(model);
+    bool has_decoder = llama_model_has_decoder(model);
+
+    fprintf(stderr, "\n[1;36mModel Info:\033[0m\n");
+    fprintf(stderr, "  trained ctx : %d tokens\n", n_ctx_train);
+    fprintf(stderr, "  requested   : %d tokens\n", cfg.n_ctx);
+    fprintf(stderr, "  encoder     : %s\n", has_encoder ? "yes" : "no");
+    fprintf(stderr, "  decoder     : %s\n", has_decoder ? "yes" : "no");
+
+    // Warn if context exceeds trained size
+    if (cfg.n_ctx > n_ctx_train && n_ctx_train > 0) {
+        fprintf(stderr, "\033[33m  ⚠ WARNING: requested ctx (%d) exceeds model's trained ctx (%d).\033[0m\n", cfg.n_ctx, n_ctx_train);
+        fprintf(stderr, "  Quality may degrade beyond the trained context length.\n");
+    }
+
+    // Flash attention warnings
+    if (cfg.flash_attn) {
+        fprintf(stderr, "  flash attn  : \033[32menabled\033[0m\n");
+    } else {
+        fprintf(stderr, "  flash attn  : \033[33mdisabled\033[0m (perf will suffer)\n");
+    }
+
+    // TurboQuant KV warnings
+    if (cfg.no_turbo) {
+        fprintf(stderr, "  KV cache    : \033[33mf16 (no turbo)\033[0m — large memory usage\n");
+    } else {
+        fprintf(stderr, "  KV cache    : \033[32mturbo4_0/turbo3_0\033[0m — ~4x compressed\n");
+    }
+
+    // MTP warning
+    if (cfg.mtp) {
+        fprintf(stderr, "  MTP         : \033[33menabled\033[0m — only works with MTP-compatible models (Gemma 4)\n");
+    }
+    fprintf(stderr, "\n");
 
     // Context params — use the fork's real enum values
     llama_context_params cparams = llama_context_default_params();
@@ -646,8 +820,30 @@ int main(int argc, char ** argv) {
     if (cli.version) { printf("anvil 0.1.0\n"); return 0; }
     if (cli.model.empty()) { fprintf(stderr, "error: no model specified\n\n"); print_usage(); return 1; }
 
-    AnvilConfig cfg = load_config();
     HWInfo hw = probe_hw();
+    AnvilConfig cfg;
+
+    // Load model metadata to get max context
+    llama_backend_init();
+    llama_model_params mparams = llama_model_default_params();
+    mparams.n_gpu_layers = 0;
+    llama_model * meta_model = llama_model_load_from_file(cli.model.c_str(), mparams);
+    int max_ctx = 262144; // fallback
+    if (meta_model) {
+        max_ctx = llama_model_n_ctx_train(meta_model);
+        if (max_ctx <= 0) max_ctx = 262144;
+        llama_model_free(meta_model);
+    }
+
+    if (!config_exists()) {
+        // First run: show setup TUI
+        cfg = run_setup_tui(hw, max_ctx);
+        cfg.model = cli.model;
+        write_config(cfg);
+        fprintf(stderr, "\nConfig saved to %s\n", config_path().c_str());
+    } else {
+        cfg = load_config();
+    }
 
     // Print hardware info
     fprintf(stderr, "Hardware: %s | %s | %lu GB RAM\n",
@@ -662,7 +858,7 @@ int main(int argc, char ** argv) {
 
     // Resolution order: CLI > config > HW probe > hardcoded
     if (cli.n_ctx > 0)         cfg.n_ctx = cli.n_ctx;
-    else if (cfg.n_ctx == 0)   cfg.n_ctx = derive_ctx(hw.ram_bytes);
+    else if (cfg.n_ctx == 0)   cfg.n_ctx = 8192;
 
     if (cli.ngl >= 0)          cfg.ngl = cli.ngl;
     else if (cfg.ngl == 0)     cfg.ngl = derive_ngl(hw);
@@ -674,7 +870,13 @@ int main(int argc, char ** argv) {
     if (cli.no_turbo)          cfg.no_turbo = true;
 
     cfg.model = cli.model;
-    write_config(cfg);
+
+    // Only write config if user explicitly set something via CLI
+    bool has_overrides = cli.n_ctx > 0 || cli.ngl >= 0 || cli.temp >= 0 ||
+                         cli.flash_attn || cli.no_flash_attn || cli.mtp || cli.no_turbo;
+    if (has_overrides) {
+        write_config(cfg);
+    }
 
     // Validate GGUF before loading
     if (!validate_gguf(cli.model)) {
@@ -682,7 +884,6 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    llama_backend_init();
     int rc = run_chat(cli, cfg);
     llama_backend_free();
     return rc;
